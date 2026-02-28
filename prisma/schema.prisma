@@ -1,0 +1,21 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model KillRecord {
+  id            String   @id @default(cuid())
+  worldId       Int
+  creatureName  String
+  kills24h      Int
+  effectiveDate String
+  updatedAt     DateTime @updatedAt
+
+  @@unique([worldId, creatureName, effectiveDate])
+  @@index([effectiveDate])
+  @@index([worldId])
+}
