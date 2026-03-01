@@ -12,28 +12,34 @@ const USER_DATA_DIR = path.join(
 );
 
 function findChromePath(): string | undefined {
+  // Check Puppeteer's cache first (glob for any version)
+  const puppeteerBase = path.join(os.homedir(), ".cache", "puppeteer", "chrome");
+  if (fs.existsSync(puppeteerBase)) {
+    try {
+      const versions = fs.readdirSync(puppeteerBase).sort().reverse();
+      for (const ver of versions) {
+        const bin = path.join(puppeteerBase, ver, "chrome-linux64", "chrome");
+        if (fs.existsSync(bin)) return bin;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // System Chrome (skip snap — it doesn't work with Puppeteer)
   const candidates = [
-    "/root/.cache/puppeteer/chrome/linux-145.0.7632.77/chrome-linux64/chrome",
-    "/usr/bin/google-chrome",
     "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
     "/usr/bin/chromium-browser",
     "/usr/bin/chromium",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   ];
 
-  try {
-    const which = execSync(
-      "which google-chrome 2>/dev/null || which chromium 2>/dev/null",
-      { encoding: "utf-8" }
-    ).trim();
-    if (which) candidates.unshift(which);
-  } catch {
-    // not found via which
-  }
-
   for (const p of candidates) {
+    if (p.includes("snap")) continue;
     try {
-      execSync(`test -f "${p}"`, { stdio: "ignore" });
+      const resolved = fs.realpathSync(p);
+      if (resolved.includes("snap")) continue;
       return p;
     } catch {
       // doesn't exist
