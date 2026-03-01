@@ -52,6 +52,13 @@ export async function launchSession(): Promise<{
   browser: Browser;
   page: Page;
 }> {
+  // #region agent log
+  // Wipe stale profile to avoid poisoned cf_clearance (H1)
+  if (fs.existsSync(USER_DATA_DIR)) {
+    console.log(`[DBG] Clearing stale profile: ${USER_DATA_DIR}`);
+    fs.rmSync(USER_DATA_DIR, { recursive: true, force: true });
+  }
+  // #endregion
   fs.mkdirSync(USER_DATA_DIR, { recursive: true });
 
   const chromePath = findChromePath();
@@ -71,7 +78,6 @@ export async function launchSession(): Promise<{
     ],
     customConfig: {
       ...(chromePath ? { chromePath } : {}),
-      userDataDir: USER_DATA_DIR,
     },
     connectOption: {
       defaultViewport: { width: 1920, height: 1080 },
@@ -89,6 +95,9 @@ async function waitForCloudflare(
   timeoutMs = 60000
 ): Promise<boolean> {
   const start = Date.now();
+  // #region agent log
+  let pollCount = 0;
+  // #endregion
   while (Date.now() - start < timeoutMs) {
     await new Promise((r) => setTimeout(r, 3000));
 
@@ -102,6 +111,20 @@ async function waitForCloudflare(
     }
 
     const title = await page.title();
+    const url = page.url();
+    const cookies = await page.cookies();
+    const cfCookie = cookies.find((c) => c.name === "cf_clearance");
+
+    // #region agent log
+    pollCount++;
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    console.log(
+      `[DBG] CF poll #${pollCount} (${elapsed}s): title="${title}" url=${url} ` +
+      `cookies=${cookies.length} cf_clearance=${!!cfCookie}`
+    );
+    fetch('http://127.0.0.1:7422/ingest/a03d044f-8da6-4860-bc01-ff5dd4215ab7',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'98abb9'},body:JSON.stringify({sessionId:'98abb9',runId:'run1',hypothesisId:'H1-H4',location:'browser.ts:waitForCloudflare',message:'CF poll',data:{pollCount,elapsed,title,url,cookieCount:cookies.length,hasCfClearance:!!cfCookie},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+
     if (
       !title.includes("Just a moment") &&
       !title.includes("Attention Required")
@@ -193,7 +216,14 @@ export async function fetchApiData(
       try {
         return { ok: true, data: JSON.parse(text) };
       } catch {
-        return { ok: false, status: res.status, body: text.slice(0, 500) };
+        return {
+          ok: false,
+          status: res.status,
+          // #region agent log
+          headers: Object.fromEntries(res.headers.entries()),
+          // #endregion
+          body: text.slice(0, 500),
+        };
       }
     } catch (err) {
       return {
@@ -203,6 +233,11 @@ export async function fetchApiData(
       };
     }
   }, url);
+
+  // #region agent log
+  console.log(`[DBG] fetchApiData ${url}: ok=${result.ok} status=${result.status ?? 'n/a'}`);
+  fetch('http://127.0.0.1:7422/ingest/a03d044f-8da6-4860-bc01-ff5dd4215ab7',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'98abb9'},body:JSON.stringify({sessionId:'98abb9',runId:'run1',hypothesisId:'H4',location:'browser.ts:fetchApiData',message:'API result',data:{url,ok:result.ok,status:result.status},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
 
   if (result.ok) {
     return result.data;
