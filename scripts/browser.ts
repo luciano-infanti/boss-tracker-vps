@@ -1,37 +1,13 @@
-import puppeteer from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import { connect } from "puppeteer-real-browser";
 import type { Browser, Page } from "puppeteer";
 import path from "path";
 import os from "os";
 import fs from "fs";
 
-puppeteer.use(StealthPlugin());
-
-const USER_AGENTS = [
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
-];
-
-const CHROME_FLAGS = [
-  "--no-sandbox",
-  "--disable-setuid-sandbox",
-  "--disable-dev-shm-usage",
-  "--disable-gpu",
-  "--disable-software-rasterizer",
-  "--no-first-run",
-  "--lang=pt-BR,en-US,en;q=0.9",
-];
-
 const USER_DATA_DIR = path.join(
   os.homedir(),
   ".cache",
-  "boss-tracker-chrome-profile"
+  "boss-tracker-browser"
 );
 
 export async function launchSession(): Promise<{
@@ -40,30 +16,60 @@ export async function launchSession(): Promise<{
 }> {
   fs.mkdirSync(USER_DATA_DIR, { recursive: true });
 
-  const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-  console.log(`UA: ...${ua.slice(ua.indexOf("Chrome"))}`);
-
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: CHROME_FLAGS,
-    userDataDir: USER_DATA_DIR,
-    defaultViewport: { width: 1920, height: 1080 },
+  const { browser, page } = await connect({
+    headless: false,
+    turnstile: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-software-rasterizer",
+      "--no-first-run",
+      "--lang=pt-BR,en-US,en;q=0.9",
+    ],
+    customConfig: {
+      userDataDir: USER_DATA_DIR,
+    },
+    connectOption: {
+      defaultViewport: { width: 1920, height: 1080 },
+    },
   });
 
-  const page = await browser.newPage();
-  await page.setUserAgent(ua);
-  await page.setExtraHTTPHeaders({
-    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-  });
-
-  return { browser, page };
+  return {
+    browser: browser as unknown as Browser,
+    page: page as unknown as Page,
+  };
 }
 
-/**
- * Navigate to the site and wait for Cloudflare to clear.
- * Uses a DOM selector that only appears on the real page (not the CF challenge).
- * Then navigates to /killstats to set correct Referer for API calls.
- */
+async function waitForCloudflare(
+  page: Page,
+  timeoutMs = 60000
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 3000));
+
+    try {
+      await page.mouse.move(
+        200 + Math.random() * 400,
+        200 + Math.random() * 300
+      );
+    } catch {
+      // ignore
+    }
+
+    const title = await page.title();
+    if (
+      !title.includes("Just a moment") &&
+      !title.includes("Attention Required")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function establishSession(page: Page): Promise<void> {
   console.log("Establishing session on rubinot.com.br...");
 
@@ -72,64 +78,64 @@ export async function establishSession(page: Page): Promise<void> {
     timeout: 60000,
   });
 
-  // #__next only appears once the real Next.js page renders (not during CF challenge).
-  try {
-    await page.waitForFunction(
-      () =>
-        !document.title.includes("Just a moment") &&
-        document.querySelector("#__next") !== null,
-      { timeout: 60000, polling: 2000 }
-    );
-    console.log("Cloudflare cleared.");
-  } catch {
-    console.log(
-      "Timeout waiting for real content — proceeding (cookies may still be valid from a previous run)..."
-    );
-  }
+  const cfPassed = await waitForCloudflare(page);
+  console.log(cfPassed ? "Cloudflare passed." : "CF timeout — using cached cookies...");
 
-  await new Promise((r) => setTimeout(r, 3000));
+  // Wait for network to settle and JS to set cookies (analytics, CSRF, etc.)
+  try {
+    await page.waitForNetworkIdle({ idleTime: 2000, timeout: 15000 });
+  } catch {
+    // continue
+  }
+  await new Promise((r) => setTimeout(r, 5000));
 
   let cookies = await page.cookies();
   const hasCf = cookies.some((c) => c.name === "cf_clearance");
   console.log(`Main page: ${cookies.length} cookies, cf_clearance: ${hasCf}`);
 
-  // Navigate to /killstats — the Referer from this page is what the WAF expects
-  // when we call /api/killstats. Also triggers NextAuth to set CSRF cookies.
+  // Diagnostic: confirm the page actually rendered
+  const diag = await page.evaluate(() => ({
+    title: document.title,
+    url: location.href,
+    bodyLength: document.body?.innerText?.length ?? 0,
+  }));
+  console.log(`  Page: "${diag.title}" — ${diag.bodyLength} chars of content`);
+
+  // Navigate to /killstats for correct Referer on API calls
   console.log("Navigating to /killstats...");
   await page.goto("https://rubinot.com.br/killstats", {
     waitUntil: "domcontentloaded",
     timeout: 30000,
   });
 
-  try {
-    await page.waitForFunction(
-      () =>
-        !document.title.includes("Just a moment") &&
-        document.querySelector("#__next") !== null,
-      { timeout: 45000, polling: 2000 }
-    );
-  } catch {
-    // continue — may already have valid cookies from userDataDir
-  }
+  await waitForCloudflare(page, 30000);
 
-  await new Promise((r) => setTimeout(r, 2000));
+  try {
+    await page.waitForNetworkIdle({ idleTime: 2000, timeout: 15000 });
+  } catch {
+    // continue
+  }
+  await new Promise((r) => setTimeout(r, 3000));
 
   cookies = await page.cookies();
   console.log(
     `Session ready. ${cookies.length} cookies: ${cookies.map((c) => c.name).join(", ")}`
   );
+
+  const diag2 = await page.evaluate(() => ({
+    title: document.title,
+    bodyLength: document.body?.innerText?.length ?? 0,
+  }));
+  console.log(`  /killstats: "${diag2.title}" — ${diag2.bodyLength} chars`);
 }
 
 /**
- * Fetch JSON from the API using page.evaluate(fetch()) so the request
- * goes through the browser's network stack (same TLS fingerprint, same
- * cookies, same origin as the Cloudflare session).
+ * Fetch JSON from the API via in-page fetch (same TLS, same cookies).
  */
 export async function fetchApiData(
   page: Page,
   url: string
 ): Promise<unknown> {
-  // Small random delay between requests to look more human
   await new Promise((r) => setTimeout(r, 1000 + Math.random() * 2000));
 
   const result = await page.evaluate(async (apiUrl: string) => {
