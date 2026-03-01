@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { TRACKED_BOSSES, WORLDS } from "../src/lib/constants";
-import { launchBrowser, establishSession, fetchApiData } from "./browser";
+import { launchSession, establishSession, fetchApiData } from "./browser";
 
 const prisma = new PrismaClient();
 const BOSS_SET = new Set<string>(TRACKED_BOSSES);
@@ -24,8 +24,7 @@ async function scrapeAllWorlds() {
   const effectiveDate = getEffectiveKillDate();
   console.log(`Starting scrape for Tibia Day: ${effectiveDate}`);
 
-  const browser = await launchBrowser();
-  const page = await browser.newPage();
+  const { browser, page } = await launchSession();
 
   try {
     await establishSession(page);
@@ -49,6 +48,8 @@ async function scrapeAllWorlds() {
           BOSS_SET.has(e.race_name)
         );
 
+        const killed = bossEntries.filter((e) => e.creatures_killed_24h > 0);
+
         for (const boss of bossEntries) {
           await prisma.killRecord.upsert({
             where: {
@@ -71,8 +72,13 @@ async function scrapeAllWorlds() {
         }
 
         console.log(
-          `[OK] ${world.name} — ${bossEntries.length} bosses synced`
+          `[OK] ${world.name} — ${bossEntries.length} bosses synced, ${killed.length} killed today`
         );
+        if (killed.length > 0) {
+          for (const b of killed) {
+            console.log(`     ${b.race_name}: ${b.creatures_killed_24h} kills`);
+          }
+        }
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : String(error);
         console.error(`[ERR] ${world.name}: ${msg}`);

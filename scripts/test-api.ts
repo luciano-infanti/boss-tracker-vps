@@ -6,7 +6,7 @@
  */
 
 import { TRACKED_BOSSES, WORLDS } from "../src/lib/constants";
-import { launchBrowser, establishSession, fetchApiData } from "./browser";
+import { launchSession, establishSession, fetchApiData } from "./browser";
 
 const BOSS_SET = new Set<string>(TRACKED_BOSSES);
 
@@ -18,10 +18,9 @@ async function testApi() {
   console.log(`World: ${testWorld.name} (id: ${testWorld.id})`);
   console.log(`API:   ${apiUrl}\n`);
 
-  const browser = await launchBrowser();
+  const { browser, page } = await launchSession();
 
   try {
-    const page = await browser.newPage();
     await establishSession(page);
 
     console.log(`\nFetching API data...`);
