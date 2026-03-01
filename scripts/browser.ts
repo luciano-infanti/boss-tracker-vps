@@ -1,5 +1,6 @@
 import { connect } from "puppeteer-real-browser";
 import type { Browser, Page } from "puppeteer";
+import { execSync } from "child_process";
 import path from "path";
 import os from "os";
 import fs from "fs";
@@ -10,11 +11,45 @@ const USER_DATA_DIR = path.join(
   "boss-tracker-browser"
 );
 
+function findChromePath(): string | undefined {
+  const candidates = [
+    "/root/.cache/puppeteer/chrome/linux-145.0.7632.77/chrome-linux64/chrome",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  ];
+
+  try {
+    const which = execSync(
+      "which google-chrome 2>/dev/null || which chromium 2>/dev/null",
+      { encoding: "utf-8" }
+    ).trim();
+    if (which) candidates.unshift(which);
+  } catch {
+    // not found via which
+  }
+
+  for (const p of candidates) {
+    try {
+      execSync(`test -f "${p}"`, { stdio: "ignore" });
+      return p;
+    } catch {
+      // doesn't exist
+    }
+  }
+  return undefined;
+}
+
 export async function launchSession(): Promise<{
   browser: Browser;
   page: Page;
 }> {
   fs.mkdirSync(USER_DATA_DIR, { recursive: true });
+
+  const chromePath = findChromePath();
+  if (chromePath) console.log(`Using Chrome: ${chromePath}`);
 
   const { browser, page } = await connect({
     headless: false,
@@ -29,6 +64,7 @@ export async function launchSession(): Promise<{
       "--lang=pt-BR,en-US,en;q=0.9",
     ],
     customConfig: {
+      ...(chromePath ? { chromePath } : {}),
       userDataDir: USER_DATA_DIR,
     },
     connectOption: {
