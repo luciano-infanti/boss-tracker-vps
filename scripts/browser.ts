@@ -33,10 +33,6 @@ function findChromePath(): string | undefined {
   return undefined;
 }
 
-/**
- * Launch a stealth browser session using puppeteer-real-browser.
- * Returns both browser and page — the page is pre-created by the library.
- */
 export async function launchSession(): Promise<{
   browser: Browser;
   page: Page;
@@ -61,18 +57,7 @@ export async function launchSession(): Promise<{
   return { browser: browser as unknown as Browser, page: page as unknown as Page };
 }
 
-/**
- * Navigate to rubinot.com.br and wait for Cloudflare challenge to clear.
- */
-export async function establishSession(page: Page): Promise<void> {
-  console.log("Establishing session on rubinot.com.br...");
-
-  await page.goto("https://rubinot.com.br/", {
-    waitUntil: "domcontentloaded",
-    timeout: 60000,
-  });
-
-  const maxWait = 60000;
+async function waitForCloudflare(page: Page, label: string, maxWait = 60000): Promise<boolean> {
   const interval = 3000;
   let elapsed = 0;
 
@@ -80,14 +65,13 @@ export async function establishSession(page: Page): Promise<void> {
     await new Promise((r) => setTimeout(r, interval));
     elapsed += interval;
 
-    // Simulate human-like interaction while waiting
     try {
       await page.mouse.move(
         200 + Math.random() * 400,
         200 + Math.random() * 300
       );
     } catch {
-      // page might not be ready for mouse events yet
+      // page might not be ready
     }
 
     const cookies = await page.cookies();
@@ -99,27 +83,66 @@ export async function establishSession(page: Page): Promise<void> {
 
     if (hasClearance || !isChallenge) {
       console.log(
-        `Session established (${elapsed / 1000}s). ` +
+        `${label} cleared (${elapsed / 1000}s). ` +
           `Cookies: ${cookies.length}, cf_clearance: ${hasClearance}`
       );
-      return;
+      return true;
     }
 
     process.stdout.write(
-      `  Waiting for Cloudflare... ${elapsed / 1000}s\r`
+      `  Waiting for Cloudflare (${label})... ${elapsed / 1000}s\r`
     );
   }
 
-  const cookies = await page.cookies();
-  console.log(
-    `\nCloudflare wait timed out (${cookies.length} cookies). Proceeding anyway...`
-  );
+  console.log(`\n${label}: Cloudflare wait timed out.`);
+  return false;
 }
 
 /**
- * Fetch JSON from a RubinOT API endpoint.
- * Primary: in-page fetch (fast, inherits session cookies).
- * Fallback: direct page.goto navigation (full browser stack).
+ * Establish a Cloudflare-cleared session on rubinot.com.br.
+ * Navigates to the killstats page so that subsequent API calls
+ * originate from the correct page context (proper Referer header).
+ */
+export async function establishSession(page: Page): Promise<void> {
+  console.log("Establishing session on rubinot.com.br...");
+
+  await page.goto("https://rubinot.com.br/", {
+    waitUntil: "domcontentloaded",
+    timeout: 60000,
+  });
+
+  await waitForCloudflare(page, "Main page");
+
+  // Navigate to the killstats page to set the correct Referer context.
+  // Cloudflare WAF may only allow /api/* calls from certain pages.
+  console.log("Navigating to killstats page context...");
+  try {
+    await page.goto("https://rubinot.com.br/killstats", {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+
+    const title = await page.title();
+    if (title.includes("Just a moment") || title.includes("Attention Required")) {
+      await waitForCloudflare(page, "Killstats page", 30000);
+    }
+
+    const finalUrl = page.url();
+    console.log(`Page context: ${finalUrl} (title: "${await page.title()}")`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`Could not navigate to /killstats: ${msg}`);
+    console.log("Will use main page context for API calls.");
+  }
+}
+
+/**
+ * Fetch JSON from a RubinOT killstats API endpoint.
+ *
+ * Strategy 1: in-page fetch (inherits cookies + Referer from current page)
+ * Strategy 2: navigate directly to the API URL and wait for Cloudflare to clear
+ * Strategy 3: navigate to rubinot.com.br/killstats?world=X page and scrape
+ *             the __NEXT_DATA__ or rendered DOM
  */
 export async function fetchApiData(
   page: Page,
@@ -127,7 +150,9 @@ export async function fetchApiData(
 ): Promise<unknown> {
   await new Promise((r) => setTimeout(r, 1000 + Math.random() * 2000));
 
-  // Primary approach: in-page fetch
+  const worldId = new URL(url).searchParams.get("world") ?? "";
+
+  // Strategy 1: in-page fetch from current page context
   const result = await page.evaluate(async (apiUrl: string) => {
     try {
       const res = await fetch(apiUrl, {
@@ -140,7 +165,7 @@ export async function fetchApiData(
       try {
         return { ok: true, data: JSON.parse(text) };
       } catch {
-        return { ok: false, error: `Not JSON: ${text.slice(0, 200)}` };
+        return { ok: false, error: `Not JSON: ${text.slice(0, 300)}` };
       }
     } catch (err) {
       return {
@@ -154,34 +179,98 @@ export async function fetchApiData(
     return result.data;
   }
 
-  // Fallback: navigate directly to the API URL
-  if (typeof result.error === "string" && result.error.startsWith("Not JSON")) {
-    console.log(`    Fallback: navigating to ${url}`);
-    const response = await page.goto(url, {
+  // Strategy 2: navigate to the API URL and wait for any challenge to clear
+  console.log(`    [S2] Navigating to API URL for world=${worldId}...`);
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+
+    const title = await page.title();
+    if (title.includes("Just a moment") || title.includes("Attention Required")) {
+      console.log(`    [S2] Cloudflare challenge on API URL, waiting...`);
+      const cleared = await waitForCloudflare(page, `API world=${worldId}`, 30000);
+
+      if (cleared) {
+        const body = await page.evaluate(() => document.body?.innerText ?? "");
+        try {
+          const data = JSON.parse(body);
+          // Navigate back to killstats page to keep correct context
+          await page.goto("https://rubinot.com.br/killstats", {
+            waitUntil: "domcontentloaded",
+            timeout: 15000,
+          });
+          return data;
+        } catch {
+          // fall through
+        }
+      }
+    } else {
+      // Page loaded without challenge — try to parse content
+      const body = await page.evaluate(() => document.body?.innerText ?? "");
+      try {
+        const data = JSON.parse(body);
+        await page.goto("https://rubinot.com.br/killstats", {
+          waitUntil: "domcontentloaded",
+          timeout: 15000,
+        });
+        return data;
+      } catch {
+        // fall through
+      }
+    }
+  } catch {
+    // navigation failed, fall through
+  }
+
+  // Strategy 3: navigate to the killstats page with world param and scrape
+  console.log(`    [S3] Trying killstats page for world=${worldId}...`);
+  try {
+    await page.goto(`https://rubinot.com.br/killstats?world=${worldId}`, {
       waitUntil: "networkidle2",
       timeout: 30000,
     });
 
-    const text = await response?.text() ?? "";
+    const title = await page.title();
+    if (title.includes("Just a moment") || title.includes("Attention Required")) {
+      await waitForCloudflare(page, `Killstats world=${worldId}`, 30000);
+    }
 
-    // If Cloudflare challenged the API URL, wait for it to clear
-    if (text.includes("Just a moment") || text.includes("challenge-platform")) {
-      console.log("    Waiting for Cloudflare on API URL...");
-      await new Promise((r) => setTimeout(r, 10000));
-      const body = await page.evaluate(() => document.body?.innerText ?? "");
-      try {
-        return JSON.parse(body);
-      } catch {
-        throw new Error(`Not JSON after fallback: ${body.slice(0, 200)}`);
+    // Try to extract __NEXT_DATA__ (Next.js SSR data)
+    const nextData = await page.evaluate(() => {
+      const el = document.getElementById("__NEXT_DATA__");
+      if (el?.textContent) {
+        try {
+          return JSON.parse(el.textContent);
+        } catch {
+          return null;
+        }
       }
+      return null;
+    });
+
+    if (nextData?.props?.pageProps?.entries) {
+      return nextData.props.pageProps;
     }
 
-    try {
-      return JSON.parse(text);
-    } catch {
-      throw new Error(`Not JSON (fallback): ${text.slice(0, 200)}`);
+    // Try to extract data from window.__NEXT_DATA__ global
+    const windowData = await page.evaluate(() => {
+      const w = window as any;
+      if (w.__NEXT_DATA__?.props?.pageProps?.entries) {
+        return w.__NEXT_DATA__.props.pageProps;
+      }
+      return null;
+    });
+
+    if (windowData) {
+      return windowData;
     }
+  } catch {
+    // fall through
   }
 
-  throw new Error(result.error as string);
+  // All strategies failed — throw with diagnostic info
+  const errMsg =
+    typeof result.error === "string"
+      ? result.error
+      : "All fetch strategies failed";
+  throw new Error(errMsg);
 }
