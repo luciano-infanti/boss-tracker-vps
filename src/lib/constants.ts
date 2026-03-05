@@ -62,6 +62,24 @@ export const WORLD_MAP = new Map<number, string>(
   WORLDS.map((w) => [w.id, w.name])
 );
 
+/** Maps VPS world IDs → Supabase `kill_history.world` names */
+export const WORLD_ID_TO_SUPABASE_NAME: Record<number, string> = {
+  1: "Elysian",
+  9: "Lunarian",
+  10: "Spectrum",
+  11: "Auroria",
+  12: "Solarian",
+  15: "Belaria",
+  16: "Vesperia",
+  17: "Bellum",
+  18: "Mystian",
+  21: "Tenebrium",
+  22: "Serenian",
+  23: "Serenian II",
+  24: "Serenian III",
+  25: "Serenian IV",
+};
+
 export const CATEGORY_ORDER: Record<string, number> = {
   Archdemons: 0,
   POI: 1,
